@@ -1,0 +1,505 @@
+---
+title: "NHANES Data Pipeline & Biostatistical Modeling" 
+author: "Fabiana Gutierrez"
+date: "2025-06-17"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    latex_engine: xelatex
+    highlight: tango
+    fig_caption: true
+    pandoc_args:
+      - --variable=mainfont:Helvetica
+      - --variable=fontsize:11pt
+      - --variable=geometry:margin=1in
+      - --variable=colorlinks=true
+      - --variable=linkcolor:RoyalBlue
+---
+
+```{r setup, include=FALSE}
+setwd("~/Desktop/UIC/Summer 2025/BSTT 413")
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(haven)
+library(skimr)
+library(janitor)
+library(table1)
+library(naniar)
+library(ggplot2)
+library(broom)
+library(sjPlot)
+library(kableExtra)
+library(patchwork)
+library(car)
+library(ResourceSelection)
+```
+
+## Introduction
+
+### Research Objective
+
+This study explores whether U.S. adults who engage in leisure-time physical activity (LTPA) have a lower prevalence of Metabolic Syndrome (MetS) compared to those whose activity is primarily occupational (OPA), using data from the 2017–2018 cycle of the National Health and Nutrition Examination Survey (NHANES). NHANES is a nationally representative program that combines interviews, physical exams, and lab tests to assess the health and nutrition status of the U.S. population.
+
+### Background and Motivation
+
+This research question was guided by the availability of domain-specific physical activity variables in NHANES and supported by previous studies that found LTPA to be more protective against cardiometabolic conditions than OPA.
+
+### What Is Metabolic Syndrome?
+
+Metabolic Syndrome (MetS) is defined as meeting three or more of the following five criteria:
+
+1. Elevated waist circumference (≥102 cm for men, ≥88 cm for women)  
+2. Elevated triglycerides (≥150 mg/dL)  
+3. Low HDL cholesterol (<40 mg/dL for men, <50 mg/dL for women)  
+4. High blood pressure (systolic ≥130 mmHg or diastolic ≥85 mmHg)  
+5. Elevated fasting glucose (≥100 mg/dL)  
+
+MetS was coded as a binary variable (`1 = yes`, `0 = no`) using these five clinical measures available in the `BMX_J`, `BPX_J`, `HDL_J`, `TRIGLY_J`, and `GLU_J` NHANES files.
+
+### Study Variables
+
+The exposure is physical activity domain, derived from NHANES items `PAQ605` (“Do you do any vigorous or moderate-intensity leisure activity?”) and `PAQ620` (“Does your job involve vigorous or moderate-intensity activity?”). Respondents who answered “Yes” to `PAQ605` were classified as engaging in leisure-time activity; if they answered “No” to `PAQ605` but “Yes” to `PAQ620`, they were classified under occupational activity.
+
+The model also included age (`RIDAGEYR`) and sex (`RIAGENDR`) as covariates, sourced from `DEMO_J`.
+
+
+### Hypothesis and Supporting Literature
+
+It is expected that individuals who engage in leisure-time physical activity will have lower prevalence of Metabolic Syndrome than those whose activity is primarily occupational. This hypothesis is supported by:
+
+- Steinbrink et al. (2024), who found LTPA but not OPA linked to better cardiometabolic health  
+- Yao et al. (2024), who analyzed PA domains in relation to the TyG index  
+- Whitfield et al. (2020), who emphasized the importance of domain-specific PA in public health research
+
+
+
+## Descriptive Statistics
+
+The dataset was constructed by merging seven NHANES 2017–2018 files, including demographic characteristics, physical activity, blood pressure, body measures, HDL cholesterol, fasting glucose, and triglycerides.
+
+Adults aged 20 years and older were included. Participants missing data for any MetS component or key covariates were excluded. A binary Metabolic Syndrome variable was derived based on established clinical guidelines.
+
+Physical activity domain was classified as either leisure-time or occupational based on NHANES responses. Individuals who reported engaging in leisure-time physical activity were assigned to the LTPA group, while those who did not but reported occupational activity were assigned to the OPA group.
+
+The final analytic dataset includes all five MetS components, the domain-specific physical activity variable, and demographic covariates age and sex.
+
+
+```{r import-data, echo = FALSE, results = 'hide'}
+demographics <- read_xpt("DEMO_J.xpt.txt")     # Demographic variables (age, gender, etc.)
+physical_activity <- read_xpt("PAQ_J.xpt.txt") # Physical activity responses
+blood_pressure <- read_xpt("BPX_J.xpt.txt")    # Blood pressure measurements
+body_measures <- read_xpt("BMX_J.xpt.txt")     # Body measures (e.g., waist circumference)
+hdl_chol <- read_xpt("HDL_J.xpt.txt")          # HDL cholesterol
+glucose <- read_xpt("GLU_J.xpt.txt")           # Fasting glucose
+triglycerides <- read_xpt("TRIGLY_J.xpt.txt")  # Triglycerides
+```
+
+
+```{r merge-clean, echo = FALSE, results = 'hide'}
+# Merge by SEQN and keep only adults
+merged_data <- demographics %>%
+  left_join(physical_activity, by = "SEQN") %>%
+  left_join(blood_pressure, by = "SEQN") %>%
+  left_join(body_measures, by = "SEQN") %>%
+  left_join(hdl_chol, by = "SEQN") %>%
+  left_join(glucose, by = "SEQN") %>%
+  left_join(triglycerides, by = "SEQN") %>%
+  filter(RIDAGEYR >= 20)
+
+# Make sex into Male/Female
+merged_data <- merged_data %>%
+  mutate(gender = case_when(
+    RIAGENDR == 1 ~ "Male",
+    RIAGENDR == 2 ~ "Female"
+  ))
+```
+
+
+```{r create-vars, echo = FALSE, results = 'hide'}
+# Create MetS criteria + exposure variable
+cleaned_data <- merged_data %>%
+  mutate(
+    high_waist = ifelse((gender == "Male" & BMXWAIST >= 102) | (gender == "Female" & BMXWAIST >= 88), 1, 0),
+    high_bp = ifelse(BPXSY1 >= 130 | BPXSY2 >= 130 | BPXDI1 >= 85 | BPXDI2 >= 85, 1, 0),
+    low_hdl = ifelse((gender == "Male" & LBDHDDSI < 1.03) | 
+                 (gender == "Female" & LBDHDDSI < 1.29), 1, 0),
+    high_glucose = ifelse(LBXGLU >= 100, 1, 0),
+    high_trigly = ifelse(LBXTR >= 150, 1, 0),
+    mets_score = high_waist + high_bp + low_hdl + high_glucose + high_trigly,
+    MetS = ifelse(mets_score >= 3, 1, 0),
+    domain_pa = case_when(
+      PAQ605 == 1 ~ "Leisure",
+      PAQ620 == 1 & PAQ605 != 1 ~ "Occupational",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(domain_pa)) %>%
+  drop_na(high_waist, high_bp, low_hdl, high_glucose, high_trigly)
+```
+
+
+### Univariate Summary of All Variables
+
+```{r univariate-table-hidden, echo = FALSE, results = 'hide'}
+# Hidden for presentation purposes
+
+
+# Full summary table
+table1(~ RIDAGEYR + gender + domain_pa + high_waist + high_bp + low_hdl + 
+         high_glucose + high_trigly + MetS + BPXSY1 + BMXWAIST + 
+         LBDHDDSI + LBXGLU + LBXTR,
+       data = cleaned_data,
+       render.missing = NULL)
+```
+
+```{r plot-categorical-vars, echo = FALSE}
+# Define label map for plot facets
+label_map <- c(
+  domain_pa = "Activity Domain",
+  gender = "Gender",
+  high_waist = "High Waist Circumference",
+  high_bp = "High Blood Pressure",
+  low_hdl = "Low HDL Cholesterol",
+  high_glucose = "High Glucose",
+  high_trigly = "High Triglycerides",
+  MetS = "Metabolic Syndrome"
+)
+
+# Define label map for 0/1 axis
+binary_label_map <- c("0" = "No", "1" = "Yes")
+
+cleaned_data %>%
+  select(domain_pa, gender, high_waist, high_bp, low_hdl, high_glucose, high_trigly, MetS) %>%
+  mutate(across(everything(), as.factor)) %>%  # Convert all to factor for cleaner plots
+  pivot_longer(cols = everything()) %>%
+  ggplot(aes(x = value, fill = name)) +
+  geom_bar(show.legend = FALSE) +
+  facet_wrap(~ name, scales = "free_x", labeller = as_labeller(label_map)) +
+  scale_x_discrete(labels = binary_label_map) +  # Applies only to 0/1 variables
+  scale_fill_brewer(palette = "Set3") +
+  labs(title = "Distribution of Binary and Categorical Variables", x = NULL, y = "Count") +
+  theme_minimal(base_size = 13) +
+  theme(strip.text = element_text(face = "bold"))
+```
+
+We analyzed a final sample of 991 U.S. adults aged 20 and older from NHANES 2017–2018. Physical activity was categorized by domain: 52.7% reported leisure-time activity and 47.3% reported occupational activity. The overall prevalence of Metabolic Syndrome (MetS) was 38.9%.
+
+To explore the data, we visualized the univariate distribution of all key variables. The barplots show the counts of participants across binary and categorical variables, including sex, activity type, MetS components (e.g., high waist circumference, elevated triglycerides), and MetS status itself. The plots show how many participants met each clinical cutoff. For example, more than two-thirds had a high waist circumference, and almost half had elevated triglycerides. These charts provide a quick visual sense of where the health risks are concentrated.
+
+```{r plot-continuous-vars, echo = FALSE}
+# Define readable labels for continuous variables
+label_map_cont <- c(
+  BMXWAIST = "Waist Circumference (cm)",
+  BPXSY1 = "Systolic BP (mmHg)",
+  LBDHDDSI = "HDL Cholesterol (mmol/L)",
+  LBXGLU = "Fasting Glucose (mg/dL)",
+  LBXTR = "Triglycerides (mg/dL)",
+  RIDAGEYR = "Age (years)"
+)
+
+cleaned_data %>%
+  select(BMXWAIST, BPXSY1, LBDHDDSI, LBXGLU, LBXTR, RIDAGEYR) %>%
+  pivot_longer(cols = everything()) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(fill = "#69b3a2", bins = 30, color = "white") +
+  facet_wrap(~ name, scales = "free", ncol = 3, labeller = as_labeller(label_map_cont)) +
+  labs(title = "Distribution of Continuous Variables", x = NULL, y = "Count") +
+  theme_minimal(base_size = 13)
+```
+
+We also visualized continuous clinical measures with histograms. These include systolic blood pressure, waist circumference, HDL cholesterol, fasting glucose, triglycerides, and age. Variables like triglycerides and glucose showed right-skewed distributions, while blood pressure and age were more symmetric. Systolic blood pressure had approximately 4% missing data; these values were excluded automatically from the plots.
+
+```{r univariate-table, echo = FALSE}
+
+# Set labels
+label_map <- c(
+  MetS = "Metabolic Syndrome",
+  domain_pa = "Activity Domain",
+  gender = "Gender",
+  RIDAGEYR = "Age (years)",
+  BPXSY1 = "Systolic BP",
+  BMXWAIST = "Waist (cm)",
+  LBDHDDSI = "HDL Cholesterol",
+  LBXGLU = "Fasting Glucose",
+  LBXTR = "Triglycerides"
+)
+
+# Apply labels to cleaned_data
+label(cleaned_data$MetS) <- label_map["MetS"]
+label(cleaned_data$domain_pa) <- label_map["domain_pa"]
+label(cleaned_data$gender) <- label_map["gender"]
+label(cleaned_data$RIDAGEYR) <- label_map["RIDAGEYR"]
+label(cleaned_data$BPXSY1) <- label_map["BPXSY1"]
+label(cleaned_data$BMXWAIST) <- label_map["BMXWAIST"]
+label(cleaned_data$LBDHDDSI) <- label_map["LBDHDDSI"]
+label(cleaned_data$LBXGLU) <- label_map["LBXGLU"]
+label(cleaned_data$LBXTR) <- label_map["LBXTR"]
+
+# Display univariate table
+table1(~ MetS + domain_pa + gender + RIDAGEYR + BPXSY1 + BMXWAIST + 
+         LBDHDDSI + LBXGLU + LBXTR, data = cleaned_data)
+```
+
+
+
+
+## Bivariate Analysis
+
+To better understand the relationship between each variable and the outcome, the sample was stratified by Metabolic Syndrome (MetS) status. The following table compares participants with and without MetS in terms of demographic and clinical characteristics, including age, sex, physical activity domain, blood pressure, waist circumference, cholesterol, glucose, and triglycerides.
+
+```{r bivariate-table, echo = FALSE}
+# Label MetS values for clearer table headings
+cleaned_data$MetS <- factor(cleaned_data$MetS, levels = c(0, 1), labels = c("No MetS", "MetS Present"))
+
+table1(~ RIDAGEYR + gender + domain_pa + BPXSY1 + BMXWAIST + LBDHDDSI + LBXGLU + LBXTR |
+         MetS,
+       data = cleaned_data,
+       render.varlabel = function(label, varname) {
+         recode(label,
+           RIDAGEYR = "Age",
+           gender = "Gender",
+           domain_pa = "Activity Type",
+           BPXSY1 = "Systolic BP",
+           BMXWAIST = "Waist Circumference",
+           LBDHDDSI = "HDL Cholesterol",
+           LBXGLU = "Fasting Glucose",
+           LBXTR = "Triglycerides"
+         )
+       }
+)
+
+caption = "Table: Participant Characteristics by MetS Status"
+```
+
+
+
+The table shows consistent differences across MetS status. Age is notably higher among those with MetS. The distribution of physical activity domains appears balanced between groups, but differences in means for biomarkers like blood pressure, glucose, and triglycerides were substantial, as expected. These observed differences suggest that certain domains of physical activity or biomarkers might relate to MetS prevalence.
+
+Statistical tests were performed to assess differences between groups:
+
+```{r bivariate-tests, echo = FALSE, results = 'hide'}
+# Chi-square for categorical: domain_pa
+table_mets_pa <- table(cleaned_data$MetS, cleaned_data$domain_pa)
+chi_result <- chisq.test(table_mets_pa)
+chi_result
+
+OR_manual <- (table_mets_pa[2,2] / table_mets_pa[1,2]) / 
+             (table_mets_pa[2,1] / table_mets_pa[1,1])
+
+# Chi-square for gender
+chi_gender <- chisq.test(table(cleaned_data$MetS, cleaned_data$gender))
+chi_gender
+
+# t-test for age
+t_age <- t.test(RIDAGEYR ~ MetS, data = cleaned_data)
+t_age
+
+# t-test for glucose
+t_glu <- t.test(LBXGLU ~ MetS, data = cleaned_data)
+t_glu
+
+```
+
+
+```{r plots, echo = FALSE}
+# Age boxplot
+p_age <- ggplot(cleaned_data, aes(x = MetS, y = RIDAGEYR, fill = MetS)) +
+  geom_boxplot() +
+  labs(
+    title = "Age by MetS Status",
+    x = "Metabolic Syndrome",
+    y = "Age (years)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  scale_fill_manual(values = c("#66c2a5", "#fc8d62"))
+
+# Glucose boxplot
+p_glu <- ggplot(cleaned_data, aes(x = MetS, y = LBXGLU, fill = MetS)) +
+  geom_boxplot(outlier.shape = 16, outlier.size = 1.5) +
+  labs(
+    title = "Fasting Glucose by MetS Status",
+    x = "Metabolic Syndrome",
+    y = "Glucose (mg/dL)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  scale_fill_manual(values = c("#8da0cb", "#e78ac3"))
+
+# Combine plots side by side
+p_age + p_glu
+```
+**Figure:** Age and glucose distributions differ by MetS status, visually supporting the significant t-test results reported below.
+
+```{r contingency, echo = FALSE}
+# Display contingency table for domain_pa
+kable(table_mets_pa, caption = "Contingency Table: MetS by Physical Activity Domain") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+We examined the association between physical activity domain and Metabolic Syndrome (MetS) using a chi-square test. The result was not statistically significant (The chi-square statistic was 0.0286 with one degree of freedom and a p-value of 0.8657), indicating no evidence of association between activity type and MetS status. We also calculated the odds ratio to compare MetS prevalence between groups; the odds of having MetS were 1.03 times higher in the occupational activity group compared to the leisure-time group, a negligible and non-significant difference.
+
+To assess other bivariate associations, we performed a chi-square test for gender, which also showed no significant association with MetS (The chi-square statistic was 0.7030 with one degree of freedom and a p-value of 0.4018.). However, two continuous variables (age and fasting glucose) were significantly associated with MetS. A t-test revealed that participants with MetS were significantly older on average (53.1 vs. 44.8 years; 95% CI: -10.38, -6.15; p < 0.0001), and had higher glucose levels (127.9 vs. 102.4 mg/dL; 95% CI: -30.54, -20.42; p < 0.0001).
+
+The results indicate that physical activity domain and gender were not significantly associated with MetS at the bivariate level, age and glucose levels were strongly linked to MetS status.
+
+
+
+
+
+## Regression Analysis
+
+We fit a logistic regression model to evaluate whether domain-specific physical activity (leisure vs. occupational) is associated with the presence of Metabolic Syndrome (MetS), controlling for age and gender. Odds ratios (ORs) with 95% confidence intervals were computed to quantify associations. The reference group for physical activity is leisure-time.
+
+```{r fit-logistic-model, echo = FALSE, results = 'hide'}
+# Fit logistic regression model
+model_mets <- glm(MetS ~ domain_pa + RIDAGEYR + gender, 
+                  family = binomial(), 
+                  data = cleaned_data)
+
+summary(model_mets)
+```
+
+```{r model-results-clean, echo = FALSE, results = 'hide'}
+# Tidy model results
+model_clean <- tidy(model_mets, conf.int = TRUE, exponentiate = TRUE)
+model_clean
+```
+
+```{r model-tab-model, echo = FALSE}
+# Display regression table with clean labels
+tidy(model_mets, exponentiate = TRUE, conf.int = TRUE) %>%
+  mutate(term = dplyr::recode(as.character(term),
+    "(Intercept)" = "Intercept",
+    "domain_paOccupational" = "Occupational PA (vs Leisure)",
+    "RIDAGEYR" = "Age (years)",
+    "genderMale" = "Male (vs Female)"
+  )) %>%
+  kable(
+    caption = "Logistic Regression Results for MetS",
+    digits = 3,
+    col.names = c("Predictor", "OR", "SE", "z", "p", "CI Lower", "CI Upper")
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), latex_options = c("hold_position"))
+```
+
+```{r plot-logistic-model, echo = FALSE}
+# Plot model results
+plot_model(model_mets, 
+           type = "est", 
+           show.values = TRUE, 
+           value.offset = 0.3,
+           axis.labels = c("Male (vs Female)", "Age (years)", "Occupational PA (vs Leisure)"),
+           title = "Odds Ratios for MetS by Physical Activity, Age, and Gender")
+```
+
+**Figure:** Odds Ratios (95% CI) from logistic regression predicting MetS.
+
+### Model Interpretation
+
+After adjusting for age and gender, domain-specific physical activity was not significantly associated with MetS (OR = 0.88, 95% CI: 0.67–1.16, p = 0.36).
+Age was a statistically significant predictor: each additional year of age increased the odds of MetS by 3% (OR = 1.03, 95% CI: 1.02–1.04, p < 0.001).
+Gender was not associated with MetS (OR = 0.80, 95% CI: 0.61–1.05, p = 0.10).
+
+The variables age and gender were included as covariates based on literature support for cardiometabolic risk.
+
+### Model Diagnostics
+
+Model assumptions were assessed:
+
+```{r check-multicollinearity, echo = FALSE, results='hide'}
+# Check multicollinearity
+vif_values <- car::vif(model_mets)
+vif_values
+```
+
+**Multicollinearity:** All VIFs were below 2, indicating no multicollinearity.
+
+```{r linearity-logic}
+# Linearity of the logit (age only)
+ggplot(cleaned_data, aes(x = RIDAGEYR, y = log(fitted(model_mets)/(1 - fitted(model_mets))))) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "loess", se = FALSE) +
+  labs(title = "Linearity of Logit for Age", x = "Age", y = "Logit(P(MetS))")
+```
+
+**Linearity in the logit:** Age showed a roughly linear relationship with the logit of MetS, supporting the assumption of linearity.
+
+### Effect Modification (Interaction)
+
+To assess whether the relationship between physical activity and MetS differed by gender, an interaction term was included.
+
+```{r interaction-model}
+# Fit model with interaction term
+interaction_model <- glm(MetS ~ domain_pa * gender + RIDAGEYR,
+                         family = binomial(),
+                         data = cleaned_data)
+
+# Clean and label terms
+tidy(interaction_model, exponentiate = TRUE, conf.int = TRUE) %>%
+  mutate(term = case_when(
+    term == "(Intercept)" ~ "Intercept",
+    term == "domain_paOccupational" ~ "Occupational PA (vs Leisure)",
+    term == "genderMale" ~ "Male (vs Female)",
+    term == "domain_paOccupational:genderMale" ~ "Interaction: Occupational × Male",
+    term == "RIDAGEYR" ~ "Age (years)",
+    TRUE ~ term
+  )) %>%
+  kable(
+    caption = "Interaction Model: Logistic Regression Results for MetS",
+    digits = 3,
+    col.names = c("Predictor", "OR", "SE", "z", "p", "CI Lower", "CI Upper")
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), latex_options = c("hold_position"))
+```
+
+The interaction term between physical activity and gender was not statistically significant (OR = 1.00, 95% CI: 0.58–1.72, p = 0.999), suggesting no evidence that the association between activity type and MetS differs by gender. Therefore, the interpretation was based on the main-effects model.
+
+
+## Final Summary and Conclusion
+
+### Summary of the Analysis & Key Results
+
+This project explored whether the type of physical activity, specifically leisure-time versus occupational, was associated with the presence of Metabolic Syndrome in United States adults.
+
+The analysis used data from the 2017 to 2018 cycle of the National Health and Nutrition Examination Survey and included adults aged twenty and older. After merging and preparing the data, the project included descriptive statistics, logistic regression modeling, and an interaction term to test for effect modification by gender.
+
+The main finding showed no statistically significant relationship between physical activity domain and the odds of having Metabolic Syndrome. According to the logistic regression model, the odds ratio was 0.88 with a p-value of 0.36 and a confidence interval from 0.67 to 1.16. This suggests that adults who reported occupational activity had similar odds of having Metabolic Syndrome compared to those who engaged in leisure-time activity.
+
+Age was a strong and statistically significant predictor. For each additional year of age, the odds of having Metabolic Syndrome increased by approximately three percent. The p-value for age was less than 0.001. Gender was not a significant factor, with an odds ratio of 0.80 and a p-value of 0.10.
+
+An interaction term was included to test whether the relationship between physical activity and Metabolic Syndrome differed by gender. The result was not significant, with an odds ratio of 1.00 and a p-value of 0.999. This indicates that the effect of activity type was similar for both males and females.
+
+In the descriptive results, the prevalence of Metabolic Syndrome was slightly higher in the occupational activity group. Although not statistically significant, this trend aligns with prior research suggesting that not all physical activity types provide equal health benefits.
+
+### Conclusion: What Does This Mean?
+
+The main hypothesis was not supported. There was no significant difference in the odds of having Metabolic Syndrome between adults engaged in leisure-time physical activity and those engaged in occupational physical activity. This means that the domain of activity alone does not explain differences in Metabolic Syndrome risk.
+
+Age had a strong and consistent association with Metabolic Syndrome. This highlights the need to focus preventive strategies on older adults, regardless of their physical activity habits. Gender did not show a significant effect in this analysis.
+
+Although the primary association was not statistically significant, the slightly higher rates of Metabolic Syndrome among those reporting occupational activity are consistent with other studies. This may suggest that the type, intensity, or context of physical activity matters more than the broad category used.
+
+### Strengths and Limitations
+
+One of the main strengths of this project is the use of clinically measured variables and a well-established definition for Metabolic Syndrome. The outcome was not based on self-report, which increases the validity of the results. The covariates included in the model were selected based on prior literature. The analysis also included an interaction term to test for effect modification, which added depth to the evaluation.
+
+However, there are several limitations. The data came from a single NHANES cycle, which may have limited the sample size and reduced power to detect small associations. Physical activity was self-reported, which introduces potential for recall bias or misclassification. The leisure and occupational labels may not fully reflect how much or how intensely participants were active.
+
+Additional covariates such as diet, stress, or socioeconomic status were not included due to project scope. The logistic regression model was kept simple, and no formal model selection, residual diagnostics, or assumption checks were performed. Survey weights were also not applied, so the findings should be interpreted descriptively rather than as generalizable estimates for the population.
+
+
+### Final Takeaway
+
+Although physical activity domain was not significantly associated with Metabolic Syndrome in this analysis, the results emphasize the need to consider the quality and context of physical activity. Age was clearly the most important predictor and should be a central focus in interventions. Future studies should use more detailed activity measures, account for intensity and duration, and include a broader set of health and lifestyle factors. Using multiple NHANES cycles and applying sample weights would also improve the generalizability and strength of the findings.
+
+
+## References
+
+Whitfield, G. P., Ussery, E. N., & Carlson, S. A. (2020). Combining data from assessments of leisure, occupational, household, and transportation physical activity among US adults, NHANES 2011–2016. *Preventive Medicine Reports, 20*, 101280.
+
+Yao, W., Wang, X., Zhang, Y., & Zhao, J. (2024). Association between domain-specific physical activity and triglyceride-glucose (TyG) index among US adults: Evidence from NHANES 2007–2018. *Scientific Reports, 14*(1), 1428.
+
+Steinbrink, J. M., Knaeps, S., & Bull, F. C. (2024). Is all physical activity equal? Investigating the total and domain-specific relationships between physical activity and cardiometabolic health in U.S. adults (NHANES 2013–2018). *PLOS ONE, 19*(3), e0283795.
