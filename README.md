@@ -36,6 +36,6 @@ A multivariable logistic regression model was built to evaluate the relationship
 ---
 
 ## 📂 Repository Contents
-*   `Project-BSTT413.Rmd`: The master R Markdown script containing the data merging, cleaning, visualization, and modeling pipelines.
-*   `Final_Project_Report.pdf`: The fully compiled analytical report featuring data visualizations, assumption checks, and formatted regression tables.
+*   `NHANES_Data_Pipeline.Rmd`: The master R Markdown script containing the data merging, cleaning, visualization, and modeling pipelines.
+*   `NHANES Data Pipeline & Biostatistical Modeling.pdf`: The fully compiled analytical report featuring data visualizations, assumption checks, and formatted regression tables.
 *   *Note: Raw NHANES `.xpt` datasets are publicly accessible via the CDC website and are not hosted in this repository due to size constraints.*
